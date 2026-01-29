@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-multipart
+xarray
+h5netcdf
+h5py
+numpy
+torch
+timm
+scikit-learn
+opencv-python
+plotly
+umap-learn
+tqdm

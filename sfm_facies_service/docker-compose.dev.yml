@@ -1,0 +1,24 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - SFM_SERVICE_DATA=/data
+    volumes:
+      - ./backend:/app
+      - ./_runs:/data
+      - ./weights:/weights
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://backend:8000
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - backend
+    command: ["streamlit", "run", "ui.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.maxUploadSize=2048"]

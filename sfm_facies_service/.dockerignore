@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.log
+.env
+.venv
+venv
+.runs
+_runs
+weights
