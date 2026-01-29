@@ -128,3 +128,84 @@ def features_for_2d(
         feat_grid = feat_grid[:, :-pad_pat_w, :]
 
     return feat_grid
+
+
+@torch.no_grad()
+def features_for_2d_batch(
+    vit: nn.Module,
+    imgs2d: list,
+    tile_size: int,
+    device: str,
+    batch_tiles: int = 8,
+):
+    # Normalize and pad each slice to multiple of tile_size
+    normed = []
+    pads = []
+    shapes = []
+    for img2d in imgs2d:
+        img = robust_norm(img2d)
+        img, (ph, pw) = pad_to_multiple(img, tile_size, pad_mode="edge")
+        normed.append(img)
+        pads.append((ph, pw))
+        shapes.append(img.shape)
+
+    max_h = max(h for h, _ in shapes)
+    max_w = max(w for _, w in shapes)
+
+    # Pad all to max_h/max_w for batch processing
+    batch_imgs = []
+    for img in normed:
+        h, w = img.shape
+        pad_h = max_h - h
+        pad_w = max_w - w
+        if pad_h or pad_w:
+            img = np.pad(img, ((0, pad_h), (0, pad_w)), mode="edge")
+        batch_imgs.append(img)
+
+    pps = tile_size // 16
+    h_pat_max = (max_h // tile_size) * pps
+    w_pat_max = (max_w // tile_size) * pps
+    d = vit.embed_dim
+
+    vit = vit.to(device)
+    vit.eval()
+
+    # Prepare per-slice grids and tile list
+    feat_grids = [np.zeros((h_pat_max, w_pat_max, d), dtype=np.float32) for _ in batch_imgs]
+    tiles, coords = [], []  # (slice_idx, y0, x0)
+
+    for s_idx in range(len(batch_imgs)):
+        for y0 in range(0, max_h, tile_size):
+            for x0 in range(0, max_w, tile_size):
+                tiles.append(batch_imgs[s_idx][y0:y0 + tile_size, x0:x0 + tile_size])
+                coords.append((s_idx, y0, x0))
+
+    def flush(batch_np, batch_xy):
+        x = np.stack(batch_np, axis=0)
+        x = torch.from_numpy(x).unsqueeze(1).to(device)
+        tok, (hp, wp) = extract_patch_tokens(vit, x)
+        tok = tok.detach().cpu().numpy().reshape(len(batch_np), hp, wp, d)
+        for i, (s_idx, y0, x0) in enumerate(batch_xy):
+            gy = (y0 // tile_size) * pps
+            gx = (x0 // tile_size) * pps
+            feat_grids[s_idx][gy:gy + pps, gx:gx + pps, :] = tok[i]
+
+    for i in tqdm(range(0, len(tiles), batch_tiles), desc="SFM tiles (batch)"):
+        flush(tiles[i:i + batch_tiles], coords[i:i + batch_tiles])
+
+    # Crop to each slice's original padded size and then remove pad_to_multiple
+    outputs = []
+    for s_idx, (ph, pw) in enumerate(pads):
+        h_i, w_i = shapes[s_idx]
+        h_pat_i = (h_i // tile_size) * pps
+        w_pat_i = (w_i // tile_size) * pps
+        fg = feat_grids[s_idx][:h_pat_i, :w_pat_i, :]
+        pad_pat_h = ph // 16
+        pad_pat_w = pw // 16
+        if pad_pat_h > 0:
+            fg = fg[:-pad_pat_h, :, :]
+        if pad_pat_w > 0:
+            fg = fg[:, :-pad_pat_w, :]
+        outputs.append(fg)
+
+    return outputs
