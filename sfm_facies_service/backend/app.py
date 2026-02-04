@@ -31,6 +31,19 @@ def _upsample_labels(labels2d: np.ndarray, out_h: int, out_w: int) -> np.ndarray
     return up[:out_h, :out_w]
 
 
+def _patch_mask(img2d: np.ndarray) -> np.ndarray:
+    # mask at patch resolution: True if any nonzero value in the patch
+    h, w = img2d.shape
+    h_p = _patch_dim(h)
+    w_p = _patch_dim(w)
+    pad_h = h_p * 16 - h
+    pad_w = w_p * 16 - w
+    if pad_h or pad_w:
+        img2d = np.pad(img2d, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=0)
+    blocks = img2d.reshape(h_p, 16, w_p, 16)
+    return np.any(blocks != 0, axis=(1, 3))
+
+
 def _list_model_files(model_size: str, tile_size: int):
     base_dir = os.path.join(MODELS_DIR, model_size, str(tile_size))
     if not os.path.isdir(base_dir):
@@ -176,7 +189,8 @@ def run_pipeline(
         update_status(path, "running", 30, "features")
         feat_grid = features_for_2d(vit, img2d, tile_size=tile_size, device=device, batch_tiles=8)
         update_status(path, "running", 70, "clustering")
-        labels = cluster_feat_grid(feat_grid, n_clusters=n_clusters)
+        mask = _patch_mask(img2d)
+        labels = cluster_feat_grid(feat_grid, n_clusters=n_clusters, mask=mask)
         update_status(path, "running", 85, "embedding")
         emb, emb_labels = embed_2d(feat_grid, labels)
 
@@ -340,20 +354,23 @@ def run_embedding_pipeline(
         for b_start in range(0, len(idx_list), batch_size):
             batch = idx_list[b_start:b_start + batch_size]
             imgs = []
+            masks = []
             for idx in batch:
                 if slice_mode == "time":
-                    imgs.append(da.isel(twt=idx).values)
+                    img = da.isel(twt=idx).values
                 elif slice_mode == "inline":
-                    imgs.append(da.isel(iline=idx).values)
+                    img = da.isel(iline=idx).values
                 else:
-                    imgs.append(da.isel(xline=idx).values)
+                    img = da.isel(xline=idx).values
+                imgs.append(img)
+                masks.append(_patch_mask(img))
 
             if len(imgs) == 1:
                 feats = [features_for_2d(vit, imgs[0], tile_size=tile_size, device=device, batch_tiles=8)]
             else:
                 feats = features_for_2d_batch(vit, imgs, tile_size=tile_size, device=device, batch_tiles=8)
 
-            for idx, feat in zip(batch, feats):
+            for idx, feat, mask in zip(batch, feats, masks):
                 h_p, w_p = feat.shape[0], feat.shape[1]
                 if slice_mode == "time":
                     coords_a = (np.arange(h_p) * 16 + 8).astype(np.int32)  # iline
@@ -367,6 +384,7 @@ def run_embedding_pipeline(
                 np.savez(
                     os.path.join(embed_path, f"{slice_mode}_{idx}.npz"),
                     feat=feat.astype(np.float32),
+                    mask=mask.astype(np.uint8),
                     axis=slice_mode,
                     index=int(idx),
                     coords_a=coords_a,
@@ -442,24 +460,45 @@ def run_cluster_pipeline(
         total = len(files)
         done = 0
         update_status(embed_path, "running", 5, "cluster_fit")
+        fitted_any = False
 
         for fname in files:
-            feat = np.load(os.path.join(embed_path, fname))["feat"]
+            data = np.load(os.path.join(embed_path, fname))
+            feat = data["feat"]
+            mask = data["mask"] if "mask" in data.files else None
             x = feat.reshape(-1, feat.shape[-1])
+            if mask is not None:
+                mask_flat = mask.reshape(-1).astype(bool)
+                x = x[mask_flat]
+            if x.shape[0] == 0:
+                continue
             if max_samples_per_slice and x.shape[0] > max_samples_per_slice:
                 idx = np.random.RandomState(0).choice(x.shape[0], size=max_samples_per_slice, replace=False)
                 x = x[idx]
             km.partial_fit(x)
+            fitted_any = True
             done += 1
             update_status(embed_path, "running", 5 + int(45 * done / max(1, total)), "cluster_fit")
+
+        if not fitted_any:
+            update_status(embed_path, "failed", 100, "no nonzero samples for clustering")
+            return
 
         update_status(embed_path, "running", 55, "cluster_label")
         for i, fname in enumerate(files):
             data = np.load(os.path.join(embed_path, fname))
             feat = data["feat"]
+            mask = data["mask"] if "mask" in data.files else None
             idx = int(data["index"])
             x = feat.reshape(-1, feat.shape[-1])
-            y = km.predict(x).reshape(feat.shape[0], feat.shape[1])
+            if mask is not None:
+                mask_flat = mask.reshape(-1).astype(bool)
+                y_full = np.full((x.shape[0],), -1, dtype=np.int32)
+                if np.any(mask_flat):
+                    y_full[mask_flat] = km.predict(x[mask_flat])
+                y = y_full.reshape(feat.shape[0], feat.shape[1])
+            else:
+                y = km.predict(x).reshape(feat.shape[0], feat.shape[1])
             np.savez(
                 os.path.join(embed_path, f"labels_{slice_mode}_{idx}.npz"),
                 labels=y.astype(np.int32),
@@ -561,11 +600,11 @@ def cluster_slice(embed_id: str, axis: str, index: int):
         return JSONResponse({"error": "labels not found"}, status_code=404)
     lab = np.load(labels_path)["labels"]
 
-    if axis == "twt":
+    if axis in ("twt", "time"):
         raw = da.isel(twt=index).values
         lab_up = _upsample_labels(lab, raw.shape[0], raw.shape[1])
         out = {"raw": raw.tolist(), "labels": lab_up.tolist()}
-    elif axis == "iline":
+    elif axis in ("iline", "inline"):
         raw = da.isel(iline=index).values
         lab_up = _upsample_labels(lab, raw.shape[0], raw.shape[1])
         out = {"raw": raw.tolist(), "labels": lab_up.tolist()}
@@ -573,6 +612,9 @@ def cluster_slice(embed_id: str, axis: str, index: int):
         raw = da.isel(xline=index).values
         lab_up = _upsample_labels(lab, raw.shape[0], raw.shape[1])
         out = {"raw": raw.tolist(), "labels": lab_up.tolist()}
+    else:
+        ds.close()
+        return JSONResponse({"error": "axis must be time/inline/xline"}, status_code=400)
 
     ds.close()
     return out
@@ -683,16 +725,22 @@ def run_volume_pipeline(
 
         total_slices = len(twt_idx) + len(iline_idx) + len(xline_idx)
         done = 0
+        fitted_any = False
         update_status(path, "running", 5, "fit")
 
         for t in twt_idx:
             img2d = da.isel(twt=t).values
             feat = features_for_2d(vit, img2d, tile_size=tile_size, device=device, batch_tiles=8)
             x = feat.reshape(-1, feat.shape[-1])
+            mask = _patch_mask(img2d).reshape(-1)
+            x = x[mask.astype(bool)]
+            if x.shape[0] == 0:
+                continue
             if max_samples_per_slice and x.shape[0] > max_samples_per_slice:
                 idx = np.random.RandomState(0).choice(x.shape[0], size=max_samples_per_slice, replace=False)
                 x = x[idx]
             km.partial_fit(x)
+            fitted_any = True
             done += 1
             update_status(path, "running", 5 + int(45 * done / max(1, total_slices)), "fit")
 
@@ -700,10 +748,15 @@ def run_volume_pipeline(
             img2d = da.isel(iline=i).values
             feat = features_for_2d(vit, img2d, tile_size=tile_size, device=device, batch_tiles=8)
             x = feat.reshape(-1, feat.shape[-1])
+            mask = _patch_mask(img2d).reshape(-1)
+            x = x[mask.astype(bool)]
+            if x.shape[0] == 0:
+                continue
             if max_samples_per_slice and x.shape[0] > max_samples_per_slice:
                 idx = np.random.RandomState(0).choice(x.shape[0], size=max_samples_per_slice, replace=False)
                 x = x[idx]
             km.partial_fit(x)
+            fitted_any = True
             done += 1
             update_status(path, "running", 5 + int(45 * done / max(1, total_slices)), "fit")
 
@@ -711,12 +764,21 @@ def run_volume_pipeline(
             img2d = da.isel(xline=j).values
             feat = features_for_2d(vit, img2d, tile_size=tile_size, device=device, batch_tiles=8)
             x = feat.reshape(-1, feat.shape[-1])
+            mask = _patch_mask(img2d).reshape(-1)
+            x = x[mask.astype(bool)]
+            if x.shape[0] == 0:
+                continue
             if max_samples_per_slice and x.shape[0] > max_samples_per_slice:
                 idx = np.random.RandomState(0).choice(x.shape[0], size=max_samples_per_slice, replace=False)
                 x = x[idx]
             km.partial_fit(x)
+            fitted_any = True
             done += 1
             update_status(path, "running", 5 + int(45 * done / max(1, total_slices)), "fit")
+
+        if not fitted_any:
+            update_status(path, "failed", 100, "no nonzero samples for clustering")
+            return
 
         if not twt_idx:
             update_status(path, "failed", 100, "time slices are required for 3D cube labels")
@@ -729,7 +791,11 @@ def run_volume_pipeline(
             img2d = da.isel(twt=t).values
             feat = features_for_2d(vit, img2d, tile_size=tile_size, device=device, batch_tiles=8)
             x = feat.reshape(-1, feat.shape[-1])
-            y = km.predict(x).reshape(feat.shape[0], feat.shape[1])
+            mask = _patch_mask(img2d).reshape(-1).astype(bool)
+            y_full = np.full((x.shape[0],), -1, dtype=np.int32)
+            if np.any(mask):
+                y_full[mask] = km.predict(x[mask])
+            y = y_full.reshape(feat.shape[0], feat.shape[1])
             labels3d[t, :y.shape[0], :y.shape[1]] = y
             update_status(path, "running", 55 + int(40 * (k + 1) / max(1, len(twt_idx))), "label_time")
 

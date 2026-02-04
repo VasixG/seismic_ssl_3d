@@ -58,22 +58,21 @@ if cluster_meta.status_code == 200:
     st.subheader("Cluster meta")
     st.json(cluster_meta.json())
 
-    if meta.get("slice_mode") == "time":
-        pts = requests.get(f"{API}/cluster_points/{embed_id}", params={"max_points": 50000})
-        if pts.status_code == 200:
-            d = pts.json()
-            if len(d.get("twt", [])) > 0:
-                fig3d = px.scatter_3d(
-                    x=d["iline"],
-                    y=d["xline"],
-                    z=d["twt"],
-                    color=[str(v) for v in d["label"]],
-                    opacity=0.6,
-                )
-                fig3d.update_layout(scene=dict(zaxis=dict(autorange="reversed")))
-                st.plotly_chart(fig3d, use_container_width=True)
-            else:
-                st.warning("No points to display in 3D.")
+    pts = requests.get(f"{API}/cluster_points/{embed_id}", params={"max_points": 50000})
+    if pts.status_code == 200:
+        d = pts.json()
+        if len(d.get("twt", [])) > 0:
+            fig3d = px.scatter_3d(
+                x=d["iline"],
+                y=d["xline"],
+                z=d["twt"],
+                color=[str(v) for v in d["label"]],
+                opacity=0.6,
+            )
+            fig3d.update_layout(scene=dict(zaxis=dict(autorange="reversed")))
+            st.plotly_chart(fig3d, use_container_width=True)
+        else:
+            st.warning("No points to display in 3D.")
 
     dims = meta.get("dims", {})
     axis = meta.get("slice_mode", "time")
@@ -108,11 +107,12 @@ if cluster_meta.status_code == 200:
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("### Raw slice")
-                fig_raw = px.imshow(raw2d, origin="upper", aspect="auto", color_continuous_scale="Viridis")
+                fig_raw = px.imshow(raw2d, origin="upper", aspect="equal", color_continuous_scale="Viridis")
+                fig_raw.update_layout(coloraxis_showscale=False)
                 st.plotly_chart(fig_raw, use_container_width=True)
             with c2:
                 st.markdown("### Cluster slice")
-                fig_lab = px.imshow(lab_rgb, origin="upper", aspect="auto")
+                fig_lab = px.imshow(lab_rgb, origin="upper", aspect="equal")
                 st.plotly_chart(fig_lab, use_container_width=True)
         else:
             st.warning("Slice not available.")
