@@ -11,7 +11,7 @@ from store import new_job, save_json, save_npy, load_json, load_npy, DATA_DIR, u
 from slicers import slice_time, slice_window_agg, slice_inline, slice_xline
 from sfm import build_sfm_vit, load_sfm_checkpoint, features_for_2d, features_for_2d_batch
 from clustering import cluster_feat_grid, embed_2d
-from segy_export import save_cluster_segy
+from segy_export import save_cluster_segy, save_labels3d_segy
 
 app = FastAPI(title="SFM Facies Unsupervised Service")
 
@@ -546,12 +546,24 @@ def run_cluster_pipeline(
                         twt_idx = min(n_twt - 1, tp * 16)
                         labels3d[twt_idx, ip, xlp] = lab[ip, tp]
         save_npy(embed_path, "labels3d.npy", labels3d)
+
+        seismic_dir = os.path.join(embed_path, "seismic_data")
+        os.makedirs(seismic_dir, exist_ok=True)
+        segy_path = os.path.join(seismic_dir, "labels.segy")
+        job_meta = load_json(os.path.join(DATA_DIR, job_id), "meta.json")
+        ds = xr.open_dataset(job_meta["nc_path"])
+        try:
+            save_labels3d_segy(ds, labels3d, segy_path)
+        finally:
+            ds.close()
+
         run_meta = {
             "embed_id": embed_id,
             "job_id": job_id,
             "n_clusters": int(n_clusters),
             "slice_mode": slice_mode,
             "labels_shape": list(labels3d.shape),
+            "labels_segy": os.path.join("seismic_data", os.path.basename(segy_path)),
         }
         save_json(embed_path, "cluster_meta.json", run_meta)
         update_status(embed_path, "done", 100, "cluster_done")
