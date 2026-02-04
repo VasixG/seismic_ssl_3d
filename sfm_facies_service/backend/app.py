@@ -11,6 +11,7 @@ from store import new_job, save_json, save_npy, load_json, load_npy, DATA_DIR, u
 from slicers import slice_time, slice_window_agg, slice_inline, slice_xline
 from sfm import build_sfm_vit, load_sfm_checkpoint, features_for_2d, features_for_2d_batch
 from clustering import cluster_feat_grid, embed_2d
+from segy_export import save_cluster_segy
 
 app = FastAPI(title="SFM Facies Unsupervised Service")
 
@@ -201,6 +202,17 @@ def run_pipeline(
         save_npy(path, "emb.npy", emb.astype(np.float32))
         save_npy(path, "emb_labels.npy", emb_labels.astype(np.int32))
 
+        labels_up = _upsample_labels(labels, img2d.shape[0], img2d.shape[1]).astype(np.int32)
+        save_npy(path, "labels_up.npy", labels_up)
+
+        update_status(path, "running", 97, "saving_segy")
+        segy_path = os.path.join(path, "labels.segy")
+        ds_segy = xr.open_dataset(meta["nc_path"])
+        try:
+            save_cluster_segy(ds_segy, labels_up, slice_meta, segy_path)
+        finally:
+            ds_segy.close()
+
         run_meta = {
             "model_size": model_size,
             "tile_size": tile_size,
@@ -211,6 +223,8 @@ def run_pipeline(
             "n_clusters": int(n_clusters),
             "feat_shape": list(feat_grid.shape),
             "labels_shape": list(labels.shape),
+            "labels_up_shape": list(labels_up.shape),
+            "labels_segy": os.path.basename(segy_path),
         }
         save_json(path, "run_meta.json", run_meta)
 
