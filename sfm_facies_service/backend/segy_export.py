@@ -54,6 +54,9 @@ def _build_cluster_cube(ds: xr.Dataset, labels2d: np.ndarray, slice_meta: dict, 
 
 def save_cluster_segy(ds: xr.Dataset, labels2d: np.ndarray, slice_meta: dict, out_path: str):
     cube = _build_cluster_cube(ds, labels2d, slice_meta, fill_value=-1)
+    cube.attrs["coord_scalar"] = 1.0
+    cube.attrs["sample_rate"] = 2.0
+    cube.attrs["source_file"] = "Cluster_labels"
 
     trace_header_map = {}
     if "iline" in cube.coords:
@@ -94,6 +97,9 @@ def save_labels3d_segy(ds: xr.Dataset, labels3d: np.ndarray, out_path: str):
         {var_name: xr.DataArray(data, dims=base.dims, coords=base.coords, attrs=base.attrs)}
     )
     cube.attrs = dict(ds.attrs)
+    cube.attrs["coord_scalar"] = 1.0
+    cube.attrs["sample_rate"] = 2.0
+    cube.attrs["source_file"] = "Cluster_labels_3d"
 
     trace_header_map = {}
     if "iline" in cube.coords:
